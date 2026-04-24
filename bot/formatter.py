@@ -20,6 +20,36 @@ def _md_escape(value: str) -> str:
     return (value or '').translate(_MD_ESCAPE)
 
 
+def _score_bar(value: int, max_value: int = 25, width: int = 10) -> str:
+    """Render a text-based bar: `████████░░ 20/25`."""
+    filled = round(value / max_value * width) if max_value > 0 else 0
+    filled = max(0, min(width, filled))
+    return '█' * filled + '░' * (width - filled) + f' {value}/{max_value}'
+
+
+def _render_score_chart(score: int, breakdown: dict) -> str:
+    """Render a multi-axis score breakdown with bar chart visualization."""
+    vv = int(breakdown.get('volume_velocity_score', 0))
+    hs = int(breakdown.get('holder_score', 0))
+    bp = int(breakdown.get('buy_pressure_score', 0))
+    tj = int(breakdown.get('trajectory_score', 0))
+
+    strength = (
+        'STRONG' if score >= 85
+        else ('MODERATE' if score >= 70
+              else ('WEAK' if score >= 50 else 'VERY WEAK'))
+    )
+
+    return (
+        f'📊 *Score Breakdown* ({score}/100)\n'
+        f'`Vol  ` {_score_bar(vv)}\n'
+        f'`Hold ` {_score_bar(hs)}\n'
+        f'`Buy  ` {_score_bar(bp)}\n'
+        f'`Traj ` {_score_bar(tj)}\n'
+        f'⚡ Signal: *{strength}*'
+    )
+
+
 def format_entry_alert(
     token: dict,
     score: int,
@@ -53,22 +83,14 @@ def format_entry_alert(
 
     current_liquidity = float(liquidity.get('current_liquidity') or 0.0)
 
-    strength = (
-        'STRONG' if score >= 85 else ('MODERATE' if score >= 70 else 'WEAK')
-    )
-
-    # Keep a defensive reference to ``breakdown`` so linters don't flag the
-    # parameter as unused — callers expect us to accept the full signature.
-    _ = breakdown
-
     return (
         f"🚨 *SMART BIRD ALERT*\n"
         f"Token: ${symbol} (`{address}`)\n"
         f"Price: ${price:.6f} | MCap: ${market_cap:,.0f}\n"
-        f"✅ Graduation Score: {score}/100\n"
         f"✅ Smart Money: {short_wallet} entered {minutes_ago}min ago\n"
         f"✅ Liquidity: Healthy (${current_liquidity/1000:.1f}k depth)\n"
-        f"⚡ Signal Strength: *{strength}*\n"
+        f"\n"
+        f"{_render_score_chart(score, breakdown)}\n"
         f"🔗 Birdeye: https://birdeye.so/token/{address}"
     )
 
@@ -89,8 +111,9 @@ def format_graduation_alert(token: dict, score: int, breakdown: dict) -> str:
         f"🎯 *GRADUATION WATCH*\n"
         f"Token: ${symbol} (`{address}`)\n"
         f"Price: ${price:.6f} | MCap: ${market_cap:,.0f}\n"
-        f"✅ Layer 1 Score: {score}/100\n"
         f"✅ Holders: {holders:,} | Buy Pressure: {buy_pressure*100:.0f}%\n"
+        f"\n"
+        f"{_render_score_chart(score, breakdown)}\n"
         f"⏳ Awaiting smart-money confirmation for full alert\n"
         f"🔗 Birdeye: https://birdeye.so/token/{address}"
     )
@@ -261,14 +284,6 @@ def format_token_deep_dive(
             fv = fv / 100.0
         top_holder_pct += fv
 
-    # Score breakdown
-    vv = breakdown.get('volume_velocity_score', 0)
-    hs = breakdown.get('holder_score', 0)
-    bp = breakdown.get('buy_pressure_score', 0)
-    ts_score = breakdown.get('trajectory_score', 0)
-
-    strength = 'STRONG' if score >= 85 else ('MODERATE' if score >= 70 else ('WEAK' if score >= 50 else 'VERY WEAK'))
-
     # Pipeline status
     pipeline_line = ''
     if tracked:
@@ -290,12 +305,8 @@ def format_token_deep_dive(
         f'👥 Holders: {holder_count:,}\n'
         f'{change_1h_emoji} 1h: {change_1h:+.1f}% | {change_24h_emoji} 24h: {change_24h:+.1f}%\n'
         f'\n'
-        f'*Graduation Score: {score}/100 ({strength})*\n'
-        f'  Volume Velocity: {vv}/25\n'
-        f'  Holder Base: {hs}/25\n'
-        f'  Buy Pressure: {bp}/25 ({buy_pct:.0f}% buys in last {total_trades} trades)\n'
-        f'  Price Trajectory: {ts_score}/25\n'
-        f'\n'
+        f'{_render_score_chart(score, breakdown)}\n'
+        f'🛒 Buy Pressure: {buy_pct:.0f}% buys in last {total_trades} trades\n'
         f'🏦 Top 10 Holder Concentration: {top_holder_pct*100:.0f}%'
         f'{pipeline_line}\n'
         f'\n'
