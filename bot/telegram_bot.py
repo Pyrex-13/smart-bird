@@ -7,7 +7,7 @@ outbound alert delivery.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -21,16 +21,20 @@ from telegram.ext import (
 from config import ALERT_DEDUP_WINDOW_SECONDS
 from db.database import Database
 
+if TYPE_CHECKING:
+    from birdeye.client import BirdeyeClient
+
 log = logging.getLogger('smart-bird.bot')
 
 
 class SmartBirdBot:
     """Thin async wrapper around :class:`telegram.ext.Application`."""
 
-    def __init__(self, token: str, chat_id: str, db: Database) -> None:
+    def __init__(self, token: str, chat_id: str, db: Database, client: 'BirdeyeClient | None' = None) -> None:
         self._token = token
         self._chat_id = chat_id
         self._db = db
+        self._client = client
         self._app: Optional[Application] = None
 
     # ------------------------------------------------------------------ #
@@ -68,6 +72,8 @@ class SmartBirdBot:
         self._app.add_handler(CommandHandler('stop', self._cmd_stop))
         self._app.add_handler(CommandHandler('status', self._cmd_status))
         self._app.add_handler(CommandHandler('watchlist', self._cmd_watchlist))
+        self._app.add_handler(CommandHandler('token', self._cmd_token))
+        self._app.add_handler(CommandHandler('performance', self._cmd_performance))
 
         await self._app.initialize()
         await self._app.start()
@@ -161,7 +167,7 @@ class SmartBirdBot:
             "🐋 Smart Money Move — tracked alpha wallet entries\n"
             "🚨 Smart Bird Alert — all three layers aligned (flagship)\n"
             "🔴 Exit Signal — liquidity stress on watched tokens\n\n"
-            "Commands: /status /watchlist /stop",
+            "Commands: /status /watchlist /token /performance /stop",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
         )
@@ -237,3 +243,73 @@ class SmartBirdBot:
         await update.effective_message.reply_text(
             '\n'.join(lines), parse_mode=ParseMode.MARKDOWN,
         )
+
+    async def _cmd_performance(
+        self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/performance — show alert accuracy stats."""
+        if update.effective_message is None:
+            return
+        stats = await self._db.get_performance_stats()
+        from bot.formatter import format_performance
+        text = format_performance(stats)
+        await update.effective_message.reply_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+        )
+
+    async def _cmd_token(
+        self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """/token <address> — deep dive into a single token."""
+        if update.effective_message is None:
+            return
+        if self._client is None:
+            await update.effective_message.reply_text(
+                'Token lookup is not available right now.'
+            )
+            return
+
+        text = (update.effective_message.text or '').strip()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await update.effective_message.reply_text(
+                'Usage: /token <address>\nExample: /token So11111111111111111111111111111111111111112'
+            )
+            return
+
+        address = parts[1].strip()
+        await update.effective_message.reply_text('🔍 Analyzing token...')
+
+        try:
+            overview = await self._client.get_token_overview(address)
+            if not overview:
+                await update.effective_message.reply_text(
+                    f'Could not find token `{address}`. Check the address and try again.',
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+
+            trades = await self._client.get_token_trades(address, limit=50)
+            holders = await self._client.get_token_holders(address, limit=10)
+
+            # Check if we have it in our pipeline
+            tracked = await self._db.get_token(address)
+
+            # Score it using the GraduationPredictor scoring logic
+            from birdeye.new_listings import GraduationPredictor
+            predictor = GraduationPredictor(self._client, self._db)
+            score, breakdown = await predictor.score_token(address)
+
+            from bot.formatter import format_token_deep_dive
+            msg = format_token_deep_dive(
+                address, overview, trades, holders, tracked, score, breakdown,
+            )
+            await update.effective_message.reply_text(
+                msg, parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.exception('Token lookup failed: %s', e)
+            await update.effective_message.reply_text(
+                'Something went wrong analyzing that token. Try again later.'
+            )

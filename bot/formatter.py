@@ -157,3 +157,147 @@ def format_exit_alert(
     if triggered_by in ('lp_concentration', 'both'):
         lines.append(f"LP concentration: {lp_f*100:.0f}%")
     return '\n'.join(lines)
+
+
+def format_performance(stats: dict) -> str:
+    """Build the /performance response message."""
+    total = stats.get('total_alerts', 0)
+    if total == 0:
+        return '📊 *Smart Bird Performance*\nNo alerts tracked yet. Performance data will appear after alerts fire.'
+
+    lines = ['📊 *Smart Bird Performance*', f'Total alerts tracked: {total}', '']
+
+    for label, key in [('1h', '1h'), ('6h', '6h'), ('24h', '24h')]:
+        checked = stats.get(f'checked_{key}', 0)
+        wins = stats.get(f'wins_{key}', 0)
+        avg_ret = stats.get(f'avg_return_{key}', 0.0)
+        if checked == 0:
+            lines.append(f'*{label}:* awaiting data')
+        else:
+            win_rate = (wins / checked * 100) if checked > 0 else 0
+            emoji = '🟢' if avg_ret > 0 else '🔴'
+            lines.append(
+                f'{emoji} *{label}:* {win_rate:.0f}% win rate ({wins}/{checked}) | '
+                f'avg return: {avg_ret:+.1f}%'
+            )
+
+    recent = stats.get('recent', [])
+    if recent:
+        lines.append('')
+        lines.append('*Recent alerts:*')
+        for r in recent:
+            sym = _md_escape(r.get('symbol') or '???')
+            alert_p = float(r.get('alert_price') or 0)
+            check_1h = r.get('check_1h_price')
+            if check_1h is not None and alert_p > 0:
+                ret = (float(check_1h) - alert_p) / alert_p * 100
+                emoji = '🟢' if ret > 0 else '🔴'
+                lines.append(f'  {emoji} ${sym}: {ret:+.1f}% (1h)')
+            else:
+                lines.append(f'  ⏳ ${sym}: pending')
+
+    return '\n'.join(lines)
+
+
+def format_token_deep_dive(
+    address: str,
+    overview: dict,
+    trades: list[dict],
+    holders: list[dict],
+    tracked: dict | None,
+    score: int,
+    breakdown: dict,
+) -> str:
+    """Build the /token deep-dive response."""
+    symbol = _md_escape(overview.get('symbol') or '???')
+    name = _md_escape(overview.get('name') or 'Unknown')
+    price = float(overview.get('price') or 0)
+    mc = float(overview.get('mc') or overview.get('marketCap') or overview.get('realMc') or 0)
+    liq = overview.get('liquidity')
+    if isinstance(liq, dict):
+        liq_usd = float(liq.get('usd') or liq.get('USD') or liq.get('value') or 0)
+    elif isinstance(liq, (int, float)):
+        liq_usd = float(liq)
+    else:
+        try:
+            liq_usd = float(liq) if liq else 0.0
+        except (TypeError, ValueError):
+            liq_usd = 0.0
+    holder_count = int(overview.get('holder') or 0)
+    change_1h = float(overview.get('priceChange1h') or overview.get('priceChange1hPercent') or 0)
+    change_24h = float(overview.get('priceChange24h') or overview.get('priceChange24hPercent') or 0)
+
+    # Buy/sell pressure from trades
+    buys = sells = 0
+    for t in (trades or []):
+        side = None
+        for key in ('side', 'txType', 'type'):
+            val = t.get(key)
+            if isinstance(val, str):
+                low = val.lower()
+                if low in ('buy', 'swap_in', 'in'):
+                    side = 'buy'
+                elif low in ('sell', 'swap_out', 'out'):
+                    side = 'sell'
+                break
+        if side is None and isinstance(t.get('isBuy'), bool):
+            side = 'buy' if t['isBuy'] else 'sell'
+        if side == 'buy':
+            buys += 1
+        elif side == 'sell':
+            sells += 1
+    total_trades = buys + sells
+    buy_pct = (buys / total_trades * 100) if total_trades > 0 else 0
+
+    # Top holders concentration
+    top_holder_pct = 0.0
+    for h in (holders or []):
+        val = h.get('percent') or h.get('percentage') or h.get('share') or h.get('percentOfSupply') or 0
+        try:
+            fv = float(val)
+        except (TypeError, ValueError):
+            continue
+        if fv > 1.0:
+            fv = fv / 100.0
+        top_holder_pct += fv
+
+    # Score breakdown
+    vv = breakdown.get('volume_velocity_score', 0)
+    hs = breakdown.get('holder_score', 0)
+    bp = breakdown.get('buy_pressure_score', 0)
+    ts_score = breakdown.get('trajectory_score', 0)
+
+    strength = 'STRONG' if score >= 85 else ('MODERATE' if score >= 70 else ('WEAK' if score >= 50 else 'VERY WEAK'))
+
+    # Pipeline status
+    pipeline_line = ''
+    if tracked:
+        status = tracked.get('status', 'unknown')
+        pipeline_line = f'\n📌 Pipeline status: *{status}*'
+
+    change_1h_emoji = '🟢' if change_1h > 0 else ('🔴' if change_1h < 0 else '⚪')
+    change_24h_emoji = '🟢' if change_24h > 0 else ('🔴' if change_24h < 0 else '⚪')
+
+    return (
+        f'🔎 *TOKEN DEEP DIVE*\n'
+        f'\n'
+        f'*{name}* (${symbol})\n'
+        f'`{address}`\n'
+        f'\n'
+        f'💰 Price: ${price:.8f}\n'
+        f'📊 MCap: ${mc:,.0f}\n'
+        f'💧 Liquidity: ${liq_usd:,.0f}\n'
+        f'👥 Holders: {holder_count:,}\n'
+        f'{change_1h_emoji} 1h: {change_1h:+.1f}% | {change_24h_emoji} 24h: {change_24h:+.1f}%\n'
+        f'\n'
+        f'*Graduation Score: {score}/100 ({strength})*\n'
+        f'  Volume Velocity: {vv}/25\n'
+        f'  Holder Base: {hs}/25\n'
+        f'  Buy Pressure: {bp}/25 ({buy_pct:.0f}% buys in last {total_trades} trades)\n'
+        f'  Price Trajectory: {ts_score}/25\n'
+        f'\n'
+        f'🏦 Top 10 Holder Concentration: {top_holder_pct*100:.0f}%'
+        f'{pipeline_line}\n'
+        f'\n'
+        f'🔗 [Birdeye](https://birdeye.so/token/{address})'
+    )
