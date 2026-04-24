@@ -88,6 +88,13 @@ async def layer1_loop(
                 await db.record_alert_attempt(address, 'graduation')
                 if await bot.send_alert(msg):
                     await db.record_alert_sent(address, 'graduation')
+                    await db.record_alert_performance(
+                        address,
+                        token.get('symbol', ''),
+                        'graduation',
+                        float(token.get('breakdown', {}).get('price', 0)),
+                        float(token.get('breakdown', {}).get('market_cap', 0)),
+                    )
                 else:
                     log.warning(
                         'Graduation alert send failed for %s; will retry on next pass',
@@ -302,6 +309,13 @@ async def alert_dispatcher(
             if await bot.send_alert(msg):
                 await db.record_alert_sent(address, 'entry')
                 await db.mark_alerted(address)
+                await db.record_alert_performance(
+                    address,
+                    token_for_msg.get('symbol', ''),
+                    'entry',
+                    float(breakdown.get('price', 0)),
+                    float(breakdown.get('market_cap', 0)),
+                )
             else:
                 log.warning(
                     'Entry alert send failed for %s; leaving status at layer2 for retry',
@@ -323,6 +337,46 @@ async def cache_cleanup_loop(client: BirdeyeClient) -> None:
         except Exception as e:
             log.exception('cache_cleanup_loop error: %s', e)
         await asyncio.sleep(300)
+
+
+async def performance_loop(
+    client: BirdeyeClient,
+    db: Database,
+) -> None:
+    """Periodically check prices for past alerts to track performance."""
+    INTERVALS = [
+        ('check_1h', 3600),
+        ('check_6h', 21600),
+        ('check_24h', 86400),
+    ]
+    while True:
+        try:
+            for interval_key, min_age in INTERVALS:
+                pending = await db.get_pending_performance_checks(interval_key, min_age)
+                for row in pending:
+                    address = row.get('token_address')
+                    if not address:
+                        continue
+                    overview = await client.get_token_overview(address)
+                    if not overview:
+                        continue
+                    price = overview.get('price')
+                    if price is None:
+                        continue
+                    try:
+                        price_f = float(price)
+                    except (TypeError, ValueError):
+                        continue
+                    await db.update_performance_check(row['id'], interval_key, price_f)
+                    log.info(
+                        'Performance check %s for %s: alert_price=%.8f current=%.8f',
+                        interval_key, address, float(row.get('alert_price', 0)), price_f,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception('performance_loop error: %s', e)
+        await asyncio.sleep(300)  # Check every 5 minutes
 
 
 async def smoke_test(client: BirdeyeClient) -> None:
@@ -355,7 +409,7 @@ async def main() -> None:
         predictor = GraduationPredictor(client, db)
         tracker = SmartMoneyTracker(client, db, SMART_MONEY_WALLETS)
         monitor = LiquidityMonitor(client, db)
-        bot = SmartBirdBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, db)
+        bot = SmartBirdBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, db, client)
 
         await bot.start()
         await smoke_test(client)
@@ -400,6 +454,7 @@ async def main() -> None:
                 alert_dispatcher(signal_queue, db, monitor, bot, predictor)
             ),
             asyncio.create_task(cache_cleanup_loop(client)),
+            asyncio.create_task(performance_loop(client, db)),
         ]
         await stop_event.wait()
         log.info('Shutdown signal received — cleaning up...')
